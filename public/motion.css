@@ -1,0 +1,76 @@
+:root {
+  scroll-padding-top: calc(var(--topbar-height) + 12px);
+  scrollbar-gutter: stable;
+}
+
+.topbar {
+  position: sticky;
+  z-index: 3;
+  top: 0;
+  box-shadow: 0 6px 20px #1d29200d;
+}
+
+@supports (backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px)) {
+  .topbar {
+    background: var(--topbar-glass);
+    -webkit-backdrop-filter: blur(14px) saturate(135%);
+    backdrop-filter: blur(14px) saturate(135%);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+
+  .panel-enter:not([hidden]) { animation: panel-enter 180ms ease-out; }
+  .dish-enter { animation: detail-enter 280ms cubic-bezier(.2, .75, .28, 1) backwards; }
+  .dish-enter:nth-child(2) { animation-delay: 34ms; }
+  .dish-enter:nth-child(3) { animation-delay: 68ms; }
+  .dish-enter:focus-within { animation: none; }
+  ::view-transition-group(root) { animation: none; }
+  ::view-transition-old(root) { animation: none; mix-blend-mode: normal; }
+  ::view-transition-new(root) { animation: page-fade 200ms ease-out both; mix-blend-mode: normal; }
+
+  :root[data-theme-reveal] .theme-toggle { view-transition-name: theme-switch; }
+  :root[data-theme-reveal]::view-transition { pointer-events: none; }
+  :root[data-theme-reveal]::view-transition-new(root) {
+    animation: theme-reveal 480ms cubic-bezier(.28, .74, .3, 1) both;
+  }
+  :root[data-theme-reveal]::view-transition-group(theme-switch) { z-index: 1; animation: none; }
+  :root[data-theme-reveal]::view-transition-old(theme-switch) { display: none; }
+  :root[data-theme-reveal]::view-transition-new(theme-switch) { animation: none; mix-blend-mode: normal; }
+
+  :is(dialog.sheet, dialog.dialog)[open] {
+    animation: sheet-enter 310ms cubic-bezier(.22, .78, .28, 1);
+  }
+  :is(dialog.sheet, dialog.dialog)[open]::backdrop { animation: backdrop-enter 230ms ease-out; }
+
+  @keyframes panel-enter {
+    from { opacity: .82; }
+    to { opacity: 1; }
+  }
+
+  @keyframes detail-enter {
+    from { opacity: .65; transform: translateY(7px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @keyframes sheet-enter {
+    from { opacity: .18; translate: 0 15px; scale: .985; }
+    to { opacity: 1; translate: none; scale: none; }
+  }
+
+  @keyframes backdrop-enter {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes page-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes theme-reveal {
+    from { clip-path: circle(12px at var(--theme-origin)); }
+    to { clip-path: circle(var(--theme-radius) at var(--theme-origin)); }
+  }
+}

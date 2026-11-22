@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f4ec">
+  <meta name="description" content="餐序商家工作台。维护门店菜单，管理取餐订单，生成扫码点餐码。">
+  <title>餐序 · 商家工作台</title>
+  <script src="/theme.js"></script>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/merchant.css">
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/motion.css">
+  <script type="module" src="/merchant.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/merchant" aria-label="餐序商家工作台">
+      <img class="brand-mark" src="/assets/favicon.svg" width="38" height="38" alt="">
+      <span>餐序</span><span class="brand-divider" aria-hidden="true"></span><span class="brand-caption">商家工作台</span>
+    </a>
+    <div class="topbar-actions">
+      <button class="theme-toggle" type="button" aria-label="夜间模式" aria-pressed="false" title="切换到夜间模式">
+        <span class="theme-sky" aria-hidden="true"><span class="theme-clouds"></span><span class="theme-stars"></span><span class="theme-orb"></span></span>
+      </button>
+      <a class="button button-ghost" href="/">顾客点餐页</a>
+      <button class="button button-link" type="button" id="logout-button" hidden>退出登录</button>
+    </div>
+  </header>
+
+  <main id="loading" class="initial-status" role="status">正在连接工作台…</main>
+
+  <main class="login-layout" id="login-view" hidden>
+    <section class="login-card">
+      <p class="eyebrow">商家入口</p>
+      <h1 id="login-title">商家工作台</h1>
+      <p class="muted" id="login-description">维护门店菜单、查看订单并生成点餐二维码。</p>
+      <form id="login-form" aria-labelledby="login-title" hidden>
+        <label class="field"><span>手机号</span><input id="merchant-phone" name="phone" type="tel" autocomplete="username" pattern="(?:\+86)?1[3-9][0-9]{9}" maxlength="14" required placeholder="请输入手机号" title="请输入 11 位中国大陆手机号，可带 +86 前缀"></label>
+        <label class="field"><span>密码</span><input id="merchant-password" name="password" type="password" autocomplete="current-password" maxlength="256" required placeholder="请输入密码"></label>
+        <button class="button button-primary button-full" type="submit" id="login-submit">登录</button>
+      </form>
+      <p class="field-help login-notice" id="login-notice" role="status" hidden></p>
+      <p class="form-error" id="login-error" role="alert" hidden></p>
+      <button class="button button-outline login-retry" type="button" id="login-retry" hidden>重新连接</button>
+    </section>
+    <div class="login-panel">
+      <span class="panel-emblem" aria-hidden="true">餐</span>
+      <div><p class="login-panel-label">窗口自取</p><p class="login-panel-title">门店点餐管理</p><p>录入菜品后，将点餐码放在取餐窗口。</p></div>
+    </div>
+  </main>
+
+  <main class="dashboard" id="dashboard" hidden>
+    <aside class="sidebar">
+      <div class="shop-identity"><img class="shop-symbol" src="/assets/shop-window.jpg" width="43" height="43" alt=""><div><strong id="sidebar-shop">窗口小食</strong><span>窗口门店</span></div></div>
+      <nav class="workspace-nav" aria-label="商家功能">
+        <button type="button" data-tab="menu" class="active" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8m-8 4h8m-8 3h4"/></svg>菜单管理</button>
+        <button type="button" data-tab="orders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6m-6 4h6"/></svg>取餐订单</button>
+        <button type="button" data-tab="store"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 9 2-5h14l2 5M4 9v11h16V9M9 20v-6h6v6M3 9h18"/></svg>门店设置</button>
+        <button type="button" data-tab="qr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h2m4 0v2h-2m-4 3h2m4 1h-2m-2-4h2v2"/></svg>点餐二维码</button>
+        <button type="button" class="password-action" data-action="reset-password"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3m-4 4v2"/></svg>重置密码</button>
+      </nav>
+    </aside>
+    <div class="workspace">
+      <section data-panel="menu" id="menu-panel" aria-labelledby="menu-title">
+        <div class="page-heading"><h1 id="menu-title">菜单管理</h1><button type="button" class="button button-primary" data-action="add-item"><span aria-hidden="true">+</span> 新增餐品</button></div>
+        <div class="metrics" id="menu-metrics"></div>
+        <section class="surface category-panel" aria-labelledby="categories-title">
+          <div class="section-heading"><h2 id="categories-title">餐品分类</h2><button type="button" class="button button-outline button-small" data-action="add-category">新增分类</button></div>
+          <div id="category-list"></div>
+        </section>
+        <section class="surface items-panel" aria-labelledby="items-title">
+          <div class="section-heading"><h2 id="items-title">餐品列表</h2><label class="visually-hidden" for="category-filter">按分类筛选</label><select id="category-filter" class="filter-select" aria-label="按分类筛选"><option value="all">全部分类</option></select></div>
+          <div id="item-list"></div>
+        </section>
+      </section>
+
+      <section data-panel="orders" id="orders-panel" aria-labelledby="orders-title" hidden>
+        <div class="page-heading"><div><h1 id="orders-title">取餐订单</h1><p class="muted">查看已付款订单，按取餐号备餐与交付。</p></div><button type="button" class="button button-outline" data-action="refresh-orders">刷新订单</button></div>
+        <div class="surface orders-panel"><div id="order-filters" class="filter-tabs" aria-label="筛选订单"></div><div id="order-list" aria-live="polite"></div></div>
+      </section>
+
+      <section data-panel="store" id="store-panel" aria-labelledby="store-title" hidden>
+        <div class="page-heading"><div><h1 id="store-title">门店设置</h1><p class="muted">门店名称、公告与取餐位置会同步到顾客点餐页。</p></div></div>
+        <form id="store-form" class="surface settings-form">
+          <label class="field"><span>门店名称</span><input name="name" maxlength="32" required></label>
+          <label class="field"><span>取餐位置</span><input name="address" maxlength="120" placeholder="同济联合广场一楼 3 号窗口"></label>
+          <label class="field"><span>门店公告</span><textarea name="announcement" maxlength="120" rows="3" placeholder="请凭订单中的号码到窗口取餐"></textarea></label>
+          <p class="form-error" role="alert" hidden></p>
+          <button class="button button-primary" type="submit">保存设置</button>
+        </form>
+      </section>
+
+      <section data-panel="qr" id="qr-panel" aria-labelledby="qr-title" hidden>
+        <div class="page-heading"><div><h1 id="qr-title">点餐二维码</h1><p class="muted">把二维码放在门店窗口，顾客扫码即可进入菜单。</p></div></div>
+        <div id="qr-content" class="surface qr-layout" aria-live="polite"></div>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="edit-dialog" class="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

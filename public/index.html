@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f4ec">
+  <meta name="description" content="餐序到店点餐。查看门店菜单、下单并凭取餐号领取餐品。">
+  <title>餐序 · 到店点餐</title>
+  <script src="/theme.js"></script>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/motion.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a href="/" class="brand" aria-label="餐序点餐首页"><img class="brand-mark" src="/assets/favicon.svg" width="36" height="36" alt=""><span>餐序</span></a>
+      <nav class="site-nav" aria-label="主导航">
+        <button class="theme-toggle" type="button" aria-label="夜间模式" aria-pressed="false" title="切换到夜间模式">
+          <span class="theme-sky" aria-hidden="true"><span class="theme-clouds"></span><span class="theme-stars"></span><span class="theme-orb"></span></span>
+        </button>
+        <button class="nav-tab selected" type="button" data-view="menu" aria-current="page">点餐</button>
+        <button class="nav-tab" type="button" data-view="orders">我的订单</button>
+        <a class="merchant-link" href="/merchant">商家入口</a>
+      </nav>
+    </div>
+  </header>
+  <main class="page">
+    <section id="menu-view">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-content">
+          <span class="hero-store" id="hero-store">窗口小食</span>
+          <h1 id="hero-title">到店点餐</h1>
+          <p>选好餐品，凭号到窗口取餐。</p>
+        </div>
+      </section>
+      <section class="store-strip" aria-label="门店信息">
+        <div class="store-info">
+          <span class="store-icon" data-icon="store" aria-hidden="true"></span>
+          <div><h2 id="store-name">窗口小食</h2><p id="store-address">请到门店窗口领取餐品</p></div>
+        </div>
+        <div class="store-notice" id="store-notice" hidden><span data-icon="bell" aria-hidden="true"></span><span id="store-announcement"></span></div>
+      </section>
+      <div class="ordering">
+        <section class="menu-panel" aria-labelledby="menu-title">
+          <div class="menu-top">
+            <h2 id="menu-title">门店菜单</h2>
+            <label class="search"><span data-icon="search" aria-hidden="true"></span><input type="search" id="menu-search" placeholder="搜索餐品" aria-label="搜索餐品"></label>
+          </div>
+          <div class="menu-layout">
+            <nav class="categories" id="categories" aria-label="餐品分类"></nav>
+            <div class="menu-list" id="menu-list" aria-live="polite"><div class="empty"><p>正在加载菜单…</p></div></div>
+          </div>
+        </section>
+        <aside class="cart-panel" id="desktop-cart" aria-label="购物袋">
+          <div class="cart-heading"><h2>购物袋</h2><span class="cart-landing" id="desktop-bag-icon" data-icon="bag" aria-hidden="true"></span></div>
+          <div id="cart-lines"></div>
+          <div class="cart-footer"><div><span>合计</span><strong id="cart-total">¥0.00</strong></div><button type="button" class="primary" id="checkout-desktop" disabled>去结算</button></div>
+        </aside>
+      </div>
+    </section>
+    <section id="orders-view" class="orders-view" hidden>
+      <div class="section-heading"><div><h1>我的订单</h1><p id="order-hint">查看本设备的下单记录。</p></div><button class="secondary" type="button" id="continue-order">返回点餐</button></div>
+      <div id="order-history" aria-live="polite"></div>
+    </section>
+  </main>
+  <div class="mobile-cart" id="mobile-cart" hidden>
+    <button type="button" class="mobile-summary" id="see-cart" aria-label="查看购物袋"><span class="mobile-bag cart-landing" id="mobile-bag-icon" data-icon="bag" aria-hidden="true"></span><span><small id="mobile-count"></small><strong id="mobile-total"></strong></span></button>
+    <button type="button" class="primary" id="checkout-mobile">去结算</button>
+  </div>
+  <dialog id="cart-dialog" class="sheet" aria-labelledby="cart-title">
+    <div class="dialog-top"><h2 id="cart-title" class="cart-title"><span class="cart-landing" id="sheet-bag-icon" data-icon="bag" aria-hidden="true"></span>购物袋</h2><button type="button" class="icon-button" data-close="cart-dialog" aria-label="关闭" data-icon="close"></button></div>
+    <div id="sheet-cart-lines"></div>
+    <div class="sheet-total"><strong id="sheet-cart-total"></strong><button type="button" id="checkout-sheet" class="primary">去结算</button></div>
+  </dialog>
+  <dialog id="checkout-dialog" class="sheet" aria-labelledby="checkout-title">
+    <div class="dialog-top"><h2 id="checkout-title">确认订单</h2><button type="button" class="icon-button" data-close="checkout-dialog" aria-label="关闭" data-icon="close"></button></div>
+    <form id="checkout-form">
+      <div class="checkout-store"><strong id="checkout-store"></strong><span class="fulfillment">到店自取</span></div>
+      <div id="checkout-lines" class="checkout-lines"></div>
+      <label class="checkout-note">餐品备注 <textarea id="order-note" maxlength="120" rows="2" placeholder="例如少辣、不要葱（选填）"></textarea></label>
+      <p class="pay-hint">模拟支付 · 不会实际扣款</p>
+      <p class="inline-error" id="pay-error" role="alert" hidden></p>
+      <div class="sheet-total"><div class="due"><small>合计</small><strong id="checkout-total"></strong></div><button type="submit" class="primary" id="pay-button">确认模拟支付</button></div>
+    </form>
+  </dialog>
+  <dialog id="receipt-dialog" class="sheet" aria-labelledby="receipt-title">
+    <div class="dialog-top"><h2 id="receipt-title">订单详情</h2><button type="button" class="icon-button" data-close="receipt-dialog" aria-label="关闭" data-icon="close"></button></div>
+    <div id="receipt-content" aria-live="polite"></div>
+    <button type="button" class="secondary receipt-back" data-close="receipt-dialog">关闭订单详情</button>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
