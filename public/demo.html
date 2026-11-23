@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f1e9">
+  <title>餐序 · 分享商家入口</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/demo.css">
+  <script type="module" src="/demo.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/demo" aria-label="餐序商家入口分享页"><img class="brand-mark" src="/assets/favicon.svg" width="36" height="36" alt=""><span>餐序</span></a>
+    </div>
+  </header>
+  <main class="demo-page" aria-labelledby="demo-title">
+    <section class="demo-intro">
+      <h1 id="demo-title">分享商家入口</h1>
+      <p>扫码DIY自己的门店吧</p>
+    </section>
+    <section class="demo-code" aria-label="商家入口二维码">
+      <div class="demo-qr-frame" id="demo-frame">
+        <img id="demo-qr" width="288" height="288" alt="扫描二维码打开商家入口" hidden>
+        <span id="demo-placeholder" class="demo-placeholder" aria-hidden="true"></span>
+      </div>
+      <p class="demo-status" id="demo-status" role="status">正在准备商家入口…</p>
+      <a class="demo-address public-address" id="demo-address" hidden></a>
+      <button class="secondary" type="button" id="demo-copy" hidden>复制入口网址</button>
+    </section>
+  </main>
+</body>
+</html>

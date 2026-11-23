@@ -13,24 +13,31 @@ const icons = {
 const icon = (name) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + icons[name] + '</svg>';
 document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
 
+const storeId = new URLSearchParams(location.search).get('store');
+const storeQuery = '?store=' + encodeURIComponent(storeId ?? '');
+const storagePrefix = `canxu:${encodeURIComponent(storeId ?? '')}:`;
+$('.brand').href = '/' + storeQuery;
+
 function read(key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+  try {
+    const value = localStorage.getItem(storagePrefix + key);
+    const legacy = value === null && storeId === 'window-shop' ? localStorage.getItem('canxu:' + key) : null;
+    return JSON.parse(value ?? legacy) ?? fallback;
+  } catch { return fallback; }
 }
 function write(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  try { localStorage.setItem(storagePrefix + key, JSON.stringify(value)); } catch {}
 }
-const cart = new Map(Object.entries(read('canxu:cart', {})));
-let history = read('canxu:orders', []);
-let pending = read('canxu:pending', null);
-let store = { shop: { name: '窗口小食' }, categories: [], items: [] };
+const cart = new Map(Object.entries(read('cart', {})));
+let history = read('orders', []);
+let pending = read('pending', null);
+let store = { shop: {}, categories: [], items: [] };
 let selectedCategory = '';
 let view = 'menu';
 let hasMenu = false;
 let paying = false;
 let currentReceipt = '';
 let toastTimer;
-const storeId = new URLSearchParams(location.search).get('store');
-const storeQuery = storeId === null ? '' : '?store=' + encodeURIComponent(storeId);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
 const html = (value) => String(value ?? '').replace(/[&<>"']/g, (mark) => ({
@@ -43,7 +50,7 @@ const timeLabel = (iso) => new Intl.DateTimeFormat('zh-CN', {
 const states = { pending: '待支付', preparing: '制作中', ready: '待取餐', picked: '已取餐' };
 
 async function api(path, method = 'GET', body) {
-  const response = await fetch(path, {
+  const response = await fetch(path + storeQuery, {
     method,
     credentials: 'same-origin',
     ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {})
@@ -73,12 +80,13 @@ function empty(title, message, symbol = 'bowl') {
 
 async function loadStore({ quiet = false } = {}) {
   try {
-    const data = await api('/api/store' + storeQuery);
+    const data = await api('/api/store');
     store = data;
     hasMenu = true;
     if (!store.categories.some((category) => category.id === selectedCategory)) selectedCategory = '';
-    $('#store-name').textContent = store.shop.name;
-    $('#hero-store').textContent = store.shop.name;
+    const name = store.shop.name || '未命名门店';
+    $('#store-name').textContent = name;
+    $('#hero-store').textContent = name;
     $('#store-address').textContent = store.shop.address || '请到门店窗口领取餐品';
     $('#store-announcement').textContent = store.shop.announcement || '';
     $('#store-notice').hidden = !store.shop.announcement;
@@ -86,7 +94,7 @@ async function loadStore({ quiet = false } = {}) {
     for (const id of cart.keys()) {
       if (!ids.has(id)) cart.delete(id);
     }
-    write('canxu:cart', Object.fromEntries(cart));
+    write('cart', Object.fromEntries(cart));
     renderCategories();
     renderMenu();
     renderCart();
@@ -227,7 +235,7 @@ function openCheckout() {
 
 function saveOrder(order) {
   history = [order, ...history.filter((old) => old.id !== order.id)].slice(0, 30);
-  write('canxu:orders', history);
+  write('orders', history);
 }
 
 async function pay(event) {
@@ -253,14 +261,14 @@ async function pay(event) {
         throw new Error('餐品价格已更新，请核对金额后重新确认。');
       }
       pending = { id: order.id, signature };
-      write('canxu:pending', pending);
+      write('pending', pending);
     }
     const { order } = await api('/api/orders/' + encodeURIComponent(pending.id) + '/pay', 'POST', {});
     saveOrder(order);
     pending = null;
-    write('canxu:pending', null);
+    write('pending', null);
     cart.clear();
-    write('canxu:cart', {});
+    write('cart', {});
     $('#order-note').value = '';
     renderMenu();
     renderCart();
@@ -270,7 +278,7 @@ async function pay(event) {
   } catch (error) {
     $('#pay-error').textContent = error.message;
     $('#pay-error').hidden = false;
-    if (error.status === 404) { pending = null; write('canxu:pending', null); }
+    if (error.status === 404) { pending = null; write('pending', null); }
     if (error.status === 409 || error.status === 422) {
       await loadStore({ quiet: true });
       renderCheckout(selections());
@@ -315,7 +323,7 @@ async function refreshOrders() {
     if (index >= 0) history[index] = order;
     if (currentReceipt === id && dialog('receipt-dialog').open) renderReceipt(order);
   }));
-  write('canxu:orders', history);
+  write('orders', history);
   if (view === 'orders') renderHistory();
 }
 
@@ -358,7 +366,7 @@ document.addEventListener('click', async (event) => {
       : null;
     if (quantity) cart.set(id, quantity);
     else cart.delete(id);
-    write('canxu:cart', Object.fromEntries(cart));
+    write('cart', Object.fromEntries(cart));
     const area = button.closest('#sheet-cart-lines, #cart-lines, #menu-list');
     const hadFocus = document.activeElement === button;
     renderMenu();

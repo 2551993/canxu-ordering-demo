@@ -6,6 +6,9 @@ const dialog = $('#edit-dialog');
 const dialogContent = $('#dialog-content');
 const storeForm = $('#store-form');
 const loginForm = $('#login-form');
+const authOptions = $('#auth-options');
+const authSwitch = $('#auth-switch');
+const customerLink = $('#customer-link');
 const money = (cents) => `¥${(cents / 100).toFixed(2)}`;
 const oneId = (value) => encodeURIComponent(String(value));
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
@@ -20,9 +23,12 @@ let ordersLoaded = false;
 let orderFilter = 'all';
 let categoryFilter = 'all';
 let chosenLink = '';
+let qrLinks = null;
+let qrRequestSession = null;
 let poll;
 let toastTimer;
 let adminSession = null;
+let authMode = new URLSearchParams(location.search).get('mode') === 'register' ? 'register' : 'login';
 
 async function api(path, method = 'GET', data) {
   const requestSession = adminSession;
@@ -35,7 +41,8 @@ async function api(path, method = 'GET', data) {
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && requestSession?.authenticated && requestSession === adminSession) {
-      showLogin({ registered: true }, '登录已失效，请重新登录。');
+      authMode = 'login';
+      showLogin({ authenticated: false }, '登录已失效，请重新登录。');
     }
     const error = new Error(result.error?.message || '请求未完成，请稍后重试。');
     error.status = response.status;
@@ -65,53 +72,58 @@ function showLogin(session, message = '') {
   dashboard.hidden = true;
   loginView.hidden = false;
   $('#logout-button').hidden = true;
+  customerLink.hidden = true;
   if (dialog.open) dialog.close();
   clearInterval(poll);
   orderFilter = 'all';
   categoryFilter = 'all';
   activeTab = 'menu';
   chosenLink = '';
+  qrLinks = null;
+  $('#qr-content').replaceChildren();
   ordersLoaded = false;
   orders = [];
   store = { shop: {}, categories: [], items: [] };
   loginForm.reset();
+  renderAuthForm(session, message);
+}
 
-  const registrationPending = session?.registered === false;
-  const requiresLocal = registrationPending && !session.registrationAllowed;
+function renderAuthForm(session, message = '') {
   const title = $('#login-title');
   const description = $('#login-description');
-  if (registrationPending) {
+  const registering = authMode === 'register';
+  loginView.dataset.authMode = authMode;
+  if (session && registering) {
     title.textContent = '注册商家账号';
-    description.textContent = '使用手机号和密码创建账号，开始设置门店菜单。';
+    description.textContent = '使用手机号和密码开通门店。';
   } else if (session) {
     title.textContent = '登录商家工作台';
-    description.textContent = '登录后可维护门店菜单、查看订单并生成点餐二维码。';
+    description.textContent = '使用手机号和密码登录。';
   } else {
     title.textContent = '商家工作台';
     description.textContent = '连接服务后即可进入商家工作台。';
   }
 
   const password = loginForm.elements.password;
-  password.autocomplete = registrationPending ? 'new-password' : 'current-password';
-  password.placeholder = registrationPending ? '请设置至少 8 位密码' : '请输入密码';
-  if (registrationPending) password.minLength = 8;
+  password.autocomplete = registering ? 'new-password' : 'current-password';
+  password.placeholder = registering ? '请设置至少 8 位密码' : '请输入密码';
+  if (registering) password.minLength = 8;
   else password.removeAttribute('minlength');
-  $('#login-submit').textContent = registrationPending ? '注册并进入工作台' : '登录';
-  loginForm.hidden = !session || requiresLocal;
-
-  const notice = $('#login-notice');
-  notice.hidden = !requiresLocal;
-  notice.textContent = requiresLocal ? '请在运行点餐服务的电脑上，使用 localhost 打开商家入口完成首次注册。' : '';
-  const retry = $('#login-retry');
-  retry.hidden = Boolean(session) && !requiresLocal;
-  retry.textContent = requiresLocal ? '检查注册状态' : '重新连接';
+  $('#login-submit').textContent = registering ? '注册并进入工作台' : '登录';
+  loginForm.hidden = authOptions.hidden = authSwitch.hidden = !session;
+  authOptions.querySelectorAll('button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.mode === authMode)));
+  authSwitch.dataset.mode = registering ? 'login' : 'register';
+  authSwitch.textContent = registering ? '去登录' : '去注册';
+  $('#auth-panel-title').textContent = registering ? '已有商家账号？' : '第一次使用？';
+  $('#auth-panel-description').textContent = registering ? '登录后继续管理门店、菜单与订单。' : '开通门店、录入菜单，生成专属点餐码。';
+  $('#login-retry').hidden = Boolean(session);
   showError(loginView, message);
 }
 
 async function connectMerchant() {
   try {
     const session = await api('/session');
-    if (typeof session.registered !== 'boolean') throw new Error('无效的商家连接状态。');
+    if (typeof session.authenticated !== 'boolean') throw new Error('无效的商家连接状态。');
     if (session.authenticated) await showDashboard(session);
     else showLogin(session);
   } catch {
@@ -125,7 +137,7 @@ async function withButton(button, action) {
 }
 
 function empty(title, explanation, action, actionText) {
-  return `<div class="empty"><strong>${escape(title)}</strong><p>${escape(explanation)}</p>${action ? `<button class="button button-outline" type="button" data-action="${action}">${escape(actionText)}</button>` : ''}</div>`;
+  return `<div class="empty"><strong>${escape(title)}</strong><p>${escape(explanation)}</p>${action ? `<button class="button button-secondary" type="button" data-action="${action}">${escape(actionText)}</button>` : ''}</div>`;
 }
 
 function categoryOptions() {
@@ -143,11 +155,11 @@ function safeImageUrl(value) {
 function renderItems() {
   const display = categoryFilter === 'all' ? store.items : store.items.filter((item) => item.categoryId === categoryFilter);
   if (!display.length) {
-    $('#item-list').innerHTML = empty(store.items.length ? '该分类还没有餐品' : '添加第一道餐品', '为餐品设置名称、价格和分类。你也可以上传一张图片。', 'add-item', '新增餐品');
+    $('#item-list').innerHTML = empty(store.items.length ? '该分类还没有餐品' : '添加第一道餐品', '填写餐品名称和价格即可添加。', 'add-item', '新增餐品');
     return;
   }
   $('#item-list').innerHTML = `<ul class="item-list">${display.map((item) => {
-    const category = store.categories.find((entry) => entry.id === item.categoryId)?.name ?? '未分类';
+    const category = store.categories.find((entry) => entry.id === item.categoryId)?.name ?? '无分类';
     const imageSource = safeImageUrl(item.imageUrl);
     const photo = imageSource ? `<img class="item-image" src="${escape(imageSource)}" alt="" loading="lazy">` : '<span class="item-image item-image-placeholder" aria-hidden="true">餐品</span>';
     return `<li class="item-row"><div class="item-data">${photo}<div class="item-info"><h3 class="line-title">${escape(item.name)}</h3><div class="item-meta"><span class="price">${money(item.priceCents)}</span><span>${escape(category)}</span><span class="pill ${item.active ? '' : 'off'}">${item.active ? '已上架' : '已下架'}</span></div>${item.description ? `<p class="item-description">${escape(item.description)}</p>` : ''}</div></div><div class="inline-actions"><button class="button button-small" type="button" data-action="toggle-item" data-id="${escape(item.id)}">${item.active ? '下架' : '上架'}</button><button class="button button-small" type="button" data-action="edit-item" data-id="${escape(item.id)}">编辑</button><button class="button button-small delete-action" type="button" data-action="delete-item" data-id="${escape(item.id)}">删除</button></div></li>`;
@@ -160,7 +172,7 @@ function renderMenu() {
   $('#category-list').innerHTML = store.categories.length ? `<ul class="category-list">${store.categories.map((category) => {
     const count = store.items.filter((item) => item.categoryId === category.id).length;
     return `<li class="category-row"><div><strong class="category-name">${escape(category.name)}</strong><span class="category-count">${count} 道餐品</span></div><div class="inline-actions"><button class="button button-small" type="button" data-action="edit-category" data-id="${escape(category.id)}">编辑</button><button class="button button-small delete-action" type="button" data-action="delete-category" data-id="${escape(category.id)}">删除</button></div></li>`;
-  }).join('')}</ul>` : empty('先建一个分类', '例如小吃、主食或饮品。分类会显示在顾客菜单中。');
+  }).join('')}</ul>` : empty('暂无分类', '可按需添加小吃、主食或饮品等分类。');
   const filter = $('#category-filter');
   filter.innerHTML = `<option value="all">全部分类</option>${categoryOptions()}`;
   if (!store.categories.some((category) => category.id === categoryFilter)) categoryFilter = 'all';
@@ -169,8 +181,12 @@ function renderMenu() {
 }
 
 async function loadStore() {
-  store = await api('/store');
-  $('#sidebar-shop').textContent = store.shop.name;
+  const session = adminSession;
+  const next = await api('/store');
+  if (adminSession !== session) return;
+  store = next;
+  $('#sidebar-shop').textContent = store.shop.name || '未命名门店';
+  customerLink.href = `/?store=${oneId(store.shop.id)}`;
   renderMenu();
 }
 
@@ -195,7 +211,7 @@ function renderOrders() {
   $('#order-list').innerHTML = `<ul class="order-list">${display.map((order) => {
     const nextStatus = order.status === 'preparing' ? ['ready', '出餐就绪'] : order.status === 'ready' ? ['picked', '确认取餐'] : null;
     const statusButton = nextStatus ? `<button class="button button-primary button-small" type="button" data-action="order-status" data-id="${escape(order.id)}" data-value="${nextStatus[0]}">${nextStatus[1]}</button>` : '';
-    return `<li class="order-row"><div class="order-number">取餐号<strong>${escape(order.pickupNumber)}</strong></div><div><div class="order-meta"><span class="pill ${escape(order.status)}">${escape(orderTitles[order.status] || '已接单')}</span><span>${escape(printTitles[order.printStatus] || '待打印')}</span><span>${escape(when(order.createdAt))}</span><strong class="price">${money(order.totalCents)}</strong></div><ul class="order-lines">${order.items.map((item) => `<li class="line-title">${escape(item.name)} × ${escape(item.quantity)}</li>`).join('')}</ul>${order.note ? `<p class="order-note">备注：${escape(order.note)}</p>` : ''}</div><div class="order-actions">${statusButton}<button class="button button-outline button-small" type="button" data-action="reprint" data-id="${escape(order.id)}">补打标签</button></div></li>`;
+    return `<li class="order-row"><div class="order-number">取餐号<strong>${escape(order.pickupNumber)}</strong></div><div><div class="order-meta"><span class="pill ${escape(order.status)}">${escape(orderTitles[order.status] || '已接单')}</span><span>${escape(printTitles[order.printStatus] || '待打印')}</span><span>${escape(when(order.createdAt))}</span><strong class="price">${money(order.totalCents)}</strong></div><ul class="order-lines">${order.items.map((item) => `<li class="line-title">${escape(item.name)} × ${escape(item.quantity)}</li>`).join('')}</ul>${order.note ? `<p class="order-note">备注：${escape(order.note)}</p>` : ''}</div><div class="order-actions">${statusButton}<button class="button button-secondary button-small" type="button" data-action="reprint" data-id="${escape(order.id)}">补打标签</button></div></li>`;
   }).join('')}</ul>`;
 }
 
@@ -217,35 +233,61 @@ function qrUrl(url) {
 function setQrLink(value) {
   chosenLink = value;
   $('#qr-address').value = value;
-  $('#store-qr').src = qrUrl(value);
-  $('#download-qr').href = qrUrl(value);
-  try {
-    const host = new URL(value).hostname;
-    const localOnly = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(host);
-    $('#qr-help').textContent = localOnly ? '这个地址只能在当前电脑打开。请选用局域网或已配置的公开地址。' : '局域网演示时，顾客设备和运行服务的电脑需连接同一网络。';
-  } catch { $('#qr-help').textContent = ''; }
+  const image = $('#store-qr');
+  const source = qrUrl(value);
+  if (image.getAttribute('src') !== source) image.src = source;
+  $('#download-qr').href = source;
+  const host = new URL(value).hostname;
+  const localOnly = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(host);
+  let help = localOnly ? '当前二维码仅供本机访问。' : '当前为局域网二维码，手机和电脑须在同一可互访网络。';
+  if (value === qrLinks.publicUrl) {
+    const publicHelp = {
+      checking: '公网地址正在验证，可以先用手机流量试扫。',
+      unverified: '公网地址已分配，可以用手机流量试扫。',
+    };
+    help = publicHelp[qrLinks.publicStatus] ?? '当前为公网二维码，手机可直接扫码点餐。';
+  } else if (!qrLinks.publicUrl) {
+    help += ' 开启异地演示后，本页会自动切换到公网二维码。';
+  }
+  $('#qr-help').textContent = help;
 }
 
 async function loadLinks() {
+  const session = adminSession;
+  if (!session?.authenticated || qrRequestSession === session) return;
+  qrRequestSession = session;
   const panel = $('#qr-content');
-  panel.innerHTML = empty('正在生成点餐码', '');
+  if (!qrLinks) panel.innerHTML = empty('正在生成点餐码', '');
   try {
     const data = await api('/links');
+    if (adminSession !== session) return;
     const links = [...new Set([data.url, ...(data.urls || [])])].filter((url) => {
       if (typeof url !== 'string') return false;
       try { return /^https?:$/.test(new URL(url).protocol); } catch { return false; }
     });
     if (!links.length) {
+      qrLinks = null;
       panel.innerHTML = empty('暂无可用链接', '请确认服务地址后刷新二维码。', 'reload-links', '刷新');
       return;
     }
-    panel.innerHTML = `<div class="qr-image-box"><img id="store-qr" width="218" height="218" alt="扫码进入门店点餐页"></div><div><label class="field"><span>选择访问地址</span><select id="qr-option">${links.map((url) => `<option value="${escape(url)}">${escape(url)}</option>`).join('')}</select></label><label class="field"><span>顾客点餐链接</span><input id="qr-address" type="url" readonly></label><div class="qr-actions"><button class="button button-primary" type="button" data-action="copy-link">复制链接</button><a id="download-qr" class="button button-outline" download="餐序-门店点餐码.png">下载二维码</a></div><p id="qr-help" class="qr-help"></p></div>`;
-    $('#store-qr').addEventListener('error', () => { $('#qr-help').textContent = '二维码加载失败。请刷新本页，或复制顾客点餐链接。'; });
-    const initial = links.includes(chosenLink) ? chosenLink : links[0];
+    const next = { links, publicUrl: data.publicUrl, publicStatus: data.publicStatus };
+    if (JSON.stringify(qrLinks) === JSON.stringify(next)) return;
+
+    const initial = qrLinks && qrLinks.publicUrl === next.publicUrl && links.includes(chosenLink) ? chosenLink : links[0];
+    if (!qrLinks) {
+      panel.innerHTML = `<div class="qr-image-box"><img id="store-qr" width="218" height="218" alt="扫码进入门店点餐页"></div><div><label class="field"><span>选择访问地址</span><select id="qr-option"></select></label><label class="field"><span>顾客点餐链接</span><input id="qr-address" type="url" readonly></label><div class="qr-actions"><button class="button button-primary" type="button" data-action="copy-link">复制链接</button><a id="download-qr" class="button button-secondary" download="餐序-门店点餐码.png">下载二维码</a></div><p id="qr-help" class="qr-help"></p></div>`;
+      $('#store-qr').addEventListener('error', () => { $('#qr-help').textContent = '二维码加载失败。请刷新本页，或复制顾客点餐链接。'; });
+    }
+    if (qrLinks?.links.join('\n') !== links.join('\n')) {
+      $('#qr-option').replaceChildren(...links.map(url => new Option(url, url)));
+    }
+    qrLinks = next;
     $('#qr-option').value = initial;
     setQrLink(initial);
   } catch (error) {
-    panel.innerHTML = empty('二维码暂无数据', error.message, 'reload-links', '重试');
+    if (adminSession === session && !qrLinks) panel.innerHTML = empty('二维码暂无数据', error.message, 'reload-links', '重试');
+  } finally {
+    if (qrRequestSession === session) qrRequestSession = null;
   }
 }
 
@@ -274,25 +316,30 @@ async function switchTab(tab) {
 
 async function showDashboard(session) {
   adminSession = session;
+  authMode = 'login';
   try {
     await loadStore();
   } catch {
     if (adminSession === session) showLogin(null, '当前无法读取门店数据，请重试。');
     return;
   }
+  if (adminSession !== session) return;
   loginView.hidden = true;
   loading.hidden = true;
   dashboard.hidden = false;
   $('#logout-button').hidden = false;
+  customerLink.hidden = false;
   await switchTab('menu');
   clearInterval(poll);
   poll = setInterval(() => {
-    if (activeTab === 'orders' && !document.hidden && !dashboard.hidden) loadOrders().catch(() => {});
+    if (document.hidden || dashboard.hidden) return;
+    if (activeTab === 'orders') loadOrders().catch(() => {});
+    if (activeTab === 'qr') void loadLinks();
   }, 6500);
 }
 
 function openEdit({ title, fields, actionLabel = '保存', danger = false, submit }) {
-  dialogContent.innerHTML = `<div class="dialog-heading"><h2 id="dialog-title">${escape(title)}</h2><button class="button button-link dialog-close" type="button" data-action="close-dialog" aria-label="关闭">×</button></div><form class="dialog-body">${fields}<p class="form-error" role="alert" hidden></p><div class="dialog-actions"><button class="button button-outline" type="button" data-action="close-dialog">取消</button><button class="button ${danger ? 'button-danger' : 'button-primary'}" type="submit">${escape(actionLabel)}</button></div></form>`;
+  dialogContent.innerHTML = `<div class="dialog-heading"><h2 id="dialog-title">${escape(title)}</h2><button class="button button-link dialog-close" type="button" data-action="close-dialog" aria-label="关闭">×</button></div><form class="dialog-body">${fields}<p class="form-error" role="alert" hidden></p><div class="dialog-actions"><button class="button button-secondary" type="button" data-action="close-dialog">取消</button><button class="button ${danger ? 'button-danger' : 'button-primary'}" type="submit">${escape(actionLabel)}</button></div></form>`;
   const form = $('form', dialogContent);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -332,7 +379,7 @@ function resetPassword() {
   dialog.addEventListener('close', () => form.reset(), { once: true });
 }
 
-function editCategory(category, addItemAfter = false) {
+function editCategory(category) {
   openEdit({
     title: category ? '编辑分类' : '新增分类',
     fields: `<label class="field"><span>分类名称</span><input name="name" required maxlength="24" value="${escape(category?.name)}" placeholder="小吃"></label>`,
@@ -340,7 +387,6 @@ function editCategory(category, addItemAfter = false) {
       await api(category ? `/categories/${oneId(category.id)}` : '/categories', category ? 'PUT' : 'POST', { name: form.elements.name.value.trim() });
       await loadStore();
       showToast('分类已保存');
-      if (addItemAfter) dialog.addEventListener('close', () => { if (!dashboard.hidden) editItem(); }, { once: true });
     },
   });
 }
@@ -364,11 +410,10 @@ function parsePrice(input) {
 }
 
 function editItem(item) {
-  if (!store.categories.length) { editCategory(null, true); return; }
   const originalImage = safeImageUrl(item?.imageUrl);
   const form = openEdit({
     title: item ? '编辑餐品' : '新增餐品',
-    fields: `<label class="field"><span>餐品名称</span><input name="name" required maxlength="40" value="${escape(item?.name)}" placeholder="例如：香酥炸鸡腿"></label><div class="field-row"><label class="field"><span>价格（元）</span><input name="price" inputmode="decimal" required value="${item ? (item.priceCents / 100).toFixed(2) : ''}"></label><label class="field"><span>分类</span><select name="categoryId" required>${categoryOptions()}</select></label></div><label class="field"><span>餐品描述</span><textarea name="description" rows="2" maxlength="160" placeholder="口味、份量或其他说明">${escape(item?.description)}</textarea></label><label class="field"><span>餐品图片</span><input name="photo" type="file" accept="image/png,image/jpeg,image/webp"><small class="muted">支持 PNG、JPG 或 WebP，最多 2.5 MB。</small></label><div class="image-preview" ${originalImage ? '' : 'hidden'}><img id="item-photo-preview" ${originalImage ? `src="${escape(originalImage)}"` : ''} alt="餐品预览"><button class="button button-link button-small" type="button" id="remove-photo">移除图片</button></div><label class="check"><input name="active" type="checkbox" ${item?.active !== false ? 'checked' : ''}>在顾客菜单上架</label>`,
+    fields: `<label class="field"><span>餐品名称</span><input name="name" required maxlength="40" value="${escape(item?.name)}" placeholder="例如：香酥炸鸡腿"></label><div class="field-row"><label class="field"><span>价格（元）</span><input name="price" inputmode="decimal" required value="${item ? (item.priceCents / 100).toFixed(2) : ''}"></label><label class="field"><span>分类</span><select name="categoryId"><option value="">无分类</option>${categoryOptions()}</select></label></div><label class="field"><span>餐品描述</span><textarea name="description" rows="2" maxlength="160" placeholder="口味、份量或其他说明">${escape(item?.description)}</textarea></label><label class="field"><span>餐品图片</span><input name="photo" type="file" accept="image/png,image/jpeg,image/webp"><small class="muted">支持 PNG、JPG 或 WebP，最多 2.5 MB。</small></label><div class="image-preview" ${originalImage ? '' : 'hidden'}><img id="item-photo-preview" ${originalImage ? `src="${escape(originalImage)}"` : ''} alt="餐品预览"><button class="button button-link button-small" type="button" id="remove-photo">移除图片</button></div><label class="check"><input name="active" type="checkbox" ${item?.active !== false ? 'checked' : ''}>在顾客菜单上架</label>`,
     async submit(formData) {
       let imageUrl = formData.dataset.keepPhoto === 'true' ? item?.imageUrl || '' : '';
       const file = formData.elements.photo.files[0];
@@ -380,14 +425,14 @@ function editItem(item) {
         const dataUrl = await readDataUrl(file);
         imageUrl = (await api('/upload', 'POST', { dataUrl })).imageUrl;
       }
-      const payload = { categoryId: formData.elements.categoryId.value, name, priceCents, description: formData.elements.description.value.trim(), imageUrl, active: formData.elements.active.checked };
+      const payload = { categoryId: formData.elements.categoryId.value || null, name, priceCents, description: formData.elements.description.value.trim(), imageUrl, active: formData.elements.active.checked };
       await api(item ? `/items/${oneId(item.id)}` : '/items', item ? 'PUT' : 'POST', payload);
       await loadStore();
       showToast('餐品已保存');
     },
   });
   form.dataset.keepPhoto = String(Boolean(originalImage));
-  if (item) form.elements.categoryId.value = item.categoryId;
+  if (item) form.elements.categoryId.value = item.categoryId ?? '';
   else if (categoryFilter !== 'all') form.elements.categoryId.value = categoryFilter;
   const preview = $('.image-preview', form);
   const image = $('img', preview);
@@ -434,12 +479,20 @@ function confirmDelete(record, kind) {
   });
 }
 
+loginView.addEventListener('click', event => {
+  const selected = event.target.closest('button[data-mode]');
+  if (!selected || selected.dataset.mode === authMode || $('#login-submit').disabled) return;
+  authMode = selected.dataset.mode;
+  loginForm.elements.password.value = '';
+  renderAuthForm(adminSession);
+});
+
 loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const button = $('#login-submit');
   if (loginForm.hidden || button.disabled) return;
   showError(loginView, '');
-  const registering = adminSession.registered === false;
+  const registering = authMode === 'register';
   try {
     await withButton(button, async () => {
       const session = await api(registering ? '/register' : '/login', 'POST', {
@@ -450,8 +503,7 @@ loginForm.addEventListener('submit', async (event) => {
       await showDashboard(session);
     });
   } catch (error) {
-    if (error.status === 409 || (registering && error.status === 403)) await connectMerchant();
-    else showError(loginView, error.message);
+    showError(loginView, error.message);
   }
 });
 
@@ -460,7 +512,7 @@ $('#login-retry').addEventListener('click', (event) => {
 });
 
 $('#logout-button').addEventListener('click', async (event) => {
-  try { await withButton(event.currentTarget, async () => { await api('/logout', 'POST'); showLogin({ registered: true }); }); }
+  try { await withButton(event.currentTarget, async () => { await api('/logout', 'POST'); showLogin({ authenticated: false }); }); }
   catch (error) { showToast(error.message, 'error'); }
 });
 

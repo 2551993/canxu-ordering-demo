@@ -1,30 +1,38 @@
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, statSync } from 'node:fs';
 import { randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import QRCode from 'qrcode';
-import { paymentAdapter, printAdapter, resolveStoreEntry } from './lib/integrations.mjs';
+import { paymentAdapter, printAdapter } from './lib/integrations.mjs';
+import { activeDemoTunnel } from './lib/demo-tunnel.mjs';
+import { openStoreDatabase, uploadName } from './lib/store-database.mjs';
 
 const projectDir = dirname(fileURLToPath(import.meta.url));
 const dataDir = resolve(process.env.DATA_DIR || resolve(projectDir, 'runtime', 'data'));
 const publicDir = resolve(projectDir, 'public');
-const uploadDir = resolve(dataDir, 'uploads');
-const stateFile = resolve(dataDir, 'store.json');
 const port = Number(process.env.PORT || 8787);
 const bindHost = process.env.HOST || '0.0.0.0';
 const publicBase = process.env.PUBLIC_BASE_URL?.trim();
 const secureCookies = publicBase?.startsWith('https:') || process.env.SECURE_COOKIES === '1';
 const maxUploadBytes = 2_500_000;
 const sessionAge = 12 * 60 * 60 * 1000;
-const sessions = new Map();
 const requestWindows = new Map();
 const deriveKey = promisify(scrypt);
 const passwordHashOptions = { N: 32_768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 };
+const unknownAccount = { passwordSalt: '0'.repeat(32), passwordHash: '0'.repeat(128) };
 let activePasswordChecks = 0;
+let demoStarting = false;
+let demoCode;
+
+export const merchantEntryPath = '/merchant?mode=register';
+
+export function setDemoStarting(starting) {
+  demoStarting = starting;
+}
 
 class RequestError extends Error {
   constructor(status, code, message) {
@@ -39,15 +47,7 @@ if (publicBase) {
   const url = validatedWebUrl(publicBase);
   if (url.pathname !== '/' || url.search || url.hash) throw new Error('PUBLIC_BASE_URL 须为网站根地址');
 }
-mkdirSync(uploadDir, { recursive: true });
-
-let state = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : {
-  shop: { id: 'window-shop', name: '窗口小食', announcement: '', address: '' },
-  categories: [],
-  items: [],
-  orders: [],
-  printJobs: [],
-};
+const database = openStoreDatabase(dataDir);
 
 const chinaDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
 const fileTypes = new Map([
@@ -105,20 +105,6 @@ function validatedWebUrl(raw) {
   return url;
 }
 
-function transact(apply) {
-  const draft = structuredClone(state);
-  const answer = apply(draft);
-  const temp = `${stateFile}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temp, `${JSON.stringify(draft, null, 2)}\n`, { flag: 'wx', mode: 0o600, flush: true });
-    renameSync(temp, stateFile);
-    state = draft;
-  } finally {
-    rmSync(temp, { force: true });
-  }
-  return answer;
-}
-
 function writeResponse(response, status, contentType, body) {
   response.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store' });
   response.end(body);
@@ -149,7 +135,10 @@ async function readJson(request, limit = 32_768) {
 }
 
 function rateLimit(request, bucket, max, windowMs) {
-  const key = `${bucket}:${request.socket.remoteAddress || 'unknown'}`;
+  const cloudflareIp = request.headers['cf-connecting-ip'];
+  const ip = isLoopback(request) && publicRequest(request) && isIP(cloudflareIp ?? '')
+    ? cloudflareIp : request.socket.remoteAddress;
+  const key = `${bucket}:${ip || 'unknown'}`;
   const now = Date.now();
   let window = requestWindows.get(key);
   if (!window || window.expiresAt <= now) {
@@ -161,40 +150,52 @@ function rateLimit(request, bucket, max, windowMs) {
 }
 
 function getSessionToken(request) {
-  const token = request.headers.cookie?.match(/(?:^|;\s*)merchant_session=([a-zA-Z0-9_-]+)(?:;|$)/)?.[1];
-  if (token && (sessions.get(token) ?? 0) > Date.now()) return token;
-  return null;
+  return request.headers.cookie?.match(/(?:^|;\s*)merchant_session=([a-zA-Z0-9_-]{43})(?:;|$)/)?.[1];
 }
 
-function sessionCookie(token, maxAge) {
-  return `merchant_session=${token}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secureCookies ? '; Secure' : ''}`;
+function sessionCookie(request, token, maxAge) {
+  const secure = secureCookies || publicRequest(request)?.protocol === 'https:';
+  return `merchant_session=${token}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 
-function isLocalRegistration(request) {
-  const localAddresses = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+function isLoopback(request) {
+  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress);
+}
+
+function publicRequest(request) {
+  const origin = publicBase || activeDemoTunnel(dataDir, request.socket.localPort)?.origin;
+  const url = origin && new URL(origin);
+  return url && url.host === request.headers.host?.toLowerCase() ? url : null;
+}
+
+function isLocalRequest(request) {
   const localHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
-  return localAddresses.includes(request.socket.remoteAddress) && localHost.test(request.headers.host) &&
-    !request.headers.forwarded && !request.headers['x-forwarded-for'] && !request.headers['x-real-ip'];
+  return isLoopback(request) && localHost.test(request.headers.host) &&
+    !request.headers.forwarded && !request.headers['x-forwarded-for'] && !request.headers['x-real-ip'] &&
+    !request.headers['cf-connecting-ip'];
 }
 
-function startMerchantSession(response, oldToken, status) {
+function startMerchantSession(request, response, accountId, oldToken, status) {
   const token = randomBytes(32).toString('base64url');
-  if (oldToken) sessions.delete(oldToken);
-  sessions.set(token, Date.now() + sessionAge);
-  response.setHeader('Set-Cookie', sessionCookie(token, Math.floor(sessionAge / 1000)));
-  return writeJson(response, status, { authenticated: true, registered: true });
+  database.addSession(accountId, token, Date.now() + sessionAge, oldToken);
+  response.setHeader('Set-Cookie', sessionCookie(request, token, Math.floor(sessionAge / 1000)));
+  return writeJson(response, status, { authenticated: true });
 }
 
-function waitingCount() {
-  return state.orders.filter(order => order.paymentStatus === 'paid' && order.status === 'preparing').length;
+function requireShop(shopId) {
+  const shop = shopId && shopId.length <= 64 && database.shop(shopId);
+  requireValue(shop, 404, 'STORE_NOT_FOUND', '未找到此门店，请重新扫描店铺二维码');
+  return shop;
 }
 
-function storeView(includeInactive = false) {
+function storeView(shop, includeInactive = false) {
+  if (!shop) return { shop: null, categories: [], items: [], waitingCount: 0 };
+  const items = database.list(shop.id, 'items');
   return {
-    shop: state.shop,
-    categories: state.categories,
-    items: includeInactive ? state.items : state.items.filter(item => item.active),
-    waitingCount: waitingCount(),
+    shop,
+    categories: database.list(shop.id, 'categories'),
+    items: includeInactive ? items : items.filter(item => item.active),
+    waitingCount: database.waitingCount(shop.id),
   };
 }
 
@@ -204,7 +205,7 @@ function orderById(data, id) {
   return order;
 }
 
-function createOrder(body) {
+function createOrder(shopId, body) {
   requireValue(Array.isArray(body.items) && body.items.length >= 1 && body.items.length <= 40,
     400, 'EMPTY_CART', '请选择至少一份餐品');
   const note = textField(body.note ?? '', '备注', 200);
@@ -216,7 +217,7 @@ function createOrder(body) {
     requireValue(quantity <= 99, 400, 'INVALID_QUANTITY', '每种餐品最多可点 99 份');
     quantities.set(line.itemId, quantity);
   }
-  return transact(draft => {
+  return database.changeStore(shopId, ['items', 'orders'], draft => {
     const items = [];
     for (const [id, quantity] of quantities) {
       const item = draft.items.find(record => record.id === id && record.active);
@@ -268,11 +269,12 @@ function recordConfirmedPayment(draft, payment) {
   return order;
 }
 
-function simulatePayment(id) {
-  const existing = orderById(state, id);
+function simulatePayment(shopId, id) {
+  const existing = database.order(shopId, id);
+  requireValue(existing, 404, 'ORDER_NOT_FOUND', '未找到该订单');
   if (existing.paymentStatus === 'paid') return existing;
   requireValue(paymentAdapter.mode === 'simulation', 409, 'SIMULATION_DISABLED', '当前门店未启用模拟支付');
-  return transact(draft => {
+  return database.changeStore(shopId, ['orders', 'printJobs'], draft => {
     const payment = paymentAdapter.create(orderById(draft, id));
     return recordConfirmedPayment(draft, paymentAdapter.confirmSimulation(payment));
   });
@@ -284,12 +286,16 @@ function validateItem(body, draft) {
   const priceCents = body.priceCents;
   requireValue(Number.isInteger(priceCents) && priceCents > 0 && priceCents <= 999_999,
     400, 'INVALID_PRICE', '餐品价格须在 ¥0.01 至 ¥9999.99 之间');
-  const category = draft.categories.find(record => record.id === body.categoryId);
-  requireValue(category, 400, 'CATEGORY_REQUIRED', '请选择一个有效分类');
+  const categoryId = body.categoryId === '' ? null : body.categoryId ?? null;
+  requireValue(categoryId === null || draft.categories.some(record => record.id === categoryId),
+    400, 'INVALID_CATEGORY', '请选择本店的分类，或选择无分类');
   const imageUrl = textField(body.imageUrl ?? '', '图片地址', 2048);
-  if (imageUrl && !/^\/uploads\/[\w-]+\.(png|jpg|webp)$/.test(imageUrl) && !/^\/assets\/[\w./-]+$/.test(imageUrl)) validatedWebUrl(imageUrl);
+  const upload = uploadName.exec(imageUrl);
+  if (upload) {
+    requireValue(database.ownsUpload(draft.shop.id, upload[1]), 400, 'INVALID_IMAGE', '请使用本店上传的餐品图片');
+  } else if (imageUrl && !/^\/assets\/[\w./-]+$/.test(imageUrl)) validatedWebUrl(imageUrl);
   requireValue(body.active === undefined || typeof body.active === 'boolean', 400, 'INVALID_ACTIVE', '上架状态无效');
-  return { name, description, priceCents, categoryId: category.id, imageUrl, active: body.active ?? true };
+  return { name, description, priceCents, categoryId, imageUrl, active: body.active ?? true };
 }
 
 function imageType(bytes) {
@@ -303,7 +309,7 @@ function imageType(bytes) {
   return null;
 }
 
-function storeUpload(dataUrl) {
+function storeUpload(shopId, dataUrl) {
   requireValue(typeof dataUrl === 'string', 400, 'INVALID_IMAGE', '请选择有效图片');
   const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(dataUrl);
   requireValue(match && match[2].length % 4 === 0, 400, 'INVALID_IMAGE', '请选择 JPG、PNG 或 WebP 图片');
@@ -312,40 +318,40 @@ function storeUpload(dataUrl) {
   const type = imageType(bytes);
   requireValue(type?.mime === match[1], 400, 'INVALID_IMAGE', '图片内容和所选格式不一致');
   const filename = randomUUID() + type.extension;
-  writeFileSync(resolve(uploadDir, filename), bytes, { mode: 0o600, flag: 'wx' });
+  database.addUpload(shopId, filename, type.mime, bytes);
   return `/uploads/${filename}`;
 }
 
-function shopLinks(actualPort) {
-  const suffix = `/?store=${encodeURIComponent(state.shop.id)}`;
+function accessLinks(actualPort, path) {
   const interfaces = Object.entries(networkInterfaces())
     .sort(([first], [second]) => Number(/Wi-Fi|WLAN|以太网|Ethernet/i.test(second)) - Number(/Wi-Fi|WLAN|以太网|Ethernet/i.test(first)));
   const ips = interfaces.flatMap(([, records]) => (records ?? []).filter(record =>
     record.family === 'IPv4' && !record.internal && !record.address.startsWith('169.254.')).map(record => record.address));
-  const loopback = `http://localhost:${actualPort}${suffix}`;
-  const urls = [];
-  if (publicBase) {
-    const configured = validatedWebUrl(publicBase);
-    urls.push(new URL(suffix, configured).href);
-  }
-  if (bindHost === '0.0.0.0' || bindHost === '::') urls.push(...ips.map(ip => `http://${ip}:${actualPort}${suffix}`));
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(bindHost) && !bindHost.startsWith('127.') && bindHost !== '0.0.0.0') urls.push(`http://${bindHost}:${actualPort}${suffix}`);
+  const loopback = `http://localhost:${actualPort}${path}`;
+  const tunnel = publicBase ? null : activeDemoTunnel(dataDir, actualPort);
+  const publicOrigin = publicBase || tunnel?.origin;
+  const publicUrl = publicOrigin ? new URL(path, publicOrigin).href : null;
+  const publicStatus = publicBase ? 'configured' : tunnel?.status ?? null;
+  const urls = publicUrl ? [publicUrl] : [];
+  if (bindHost === '0.0.0.0' || bindHost === '::') urls.push(...ips.map(ip => `http://${ip}:${actualPort}${path}`));
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(bindHost) && !bindHost.startsWith('127.') && bindHost !== '0.0.0.0') urls.push(`http://${bindHost}:${actualPort}${path}`);
   const unique = [...new Set(urls)];
-  return { url: unique[0] ?? loopback, urls: unique.length ? unique : [loopback] };
+  return { url: unique[0] ?? loopback, urls: unique.length ? unique : [loopback], publicUrl, publicStatus };
+}
+
+function merchantLinks(request, shopId) {
+  const links = accessLinks(request.socket.localPort, `/?store=${encodeURIComponent(shopId)}`);
+  if (links.publicUrl && publicRequest(request)) return { ...links, urls: [links.publicUrl] };
+  return links;
 }
 
 async function adminRoute(request, response, url) {
   const { pathname } = url;
   const method = request.method;
   const token = getSessionToken(request);
-  if (method === 'GET' && pathname === '/api/admin/session') return writeJson(response, 200, {
-    authenticated: Boolean(token),
-    registered: Boolean(state.merchantAccount),
-    registrationAllowed: !state.merchantAccount && isLocalRegistration(request),
-  });
+  const session = database.session(token);
+  if (method === 'GET' && pathname === '/api/admin/session') return writeJson(response, 200, { authenticated: Boolean(session) });
   if (method === 'POST' && pathname === '/api/admin/register') {
-    requireValue(isLocalRegistration(request), 403, 'LOCAL_REGISTRATION_REQUIRED', '请在运行系统的电脑上注册');
-    requireValue(!state.merchantAccount, 409, 'ALREADY_REGISTERED', '商家账号已注册，请登录');
     rateLimit(request, 'merchant_register', 5, 60_000);
     const body = await readJson(request, 2048);
     const phone = normalizedPhone(body.phone);
@@ -354,91 +360,88 @@ async function adminRoute(request, response, url) {
       400, 'INVALID_PASSWORD', '密码须为 8 至 256 个字符');
     const salt = randomBytes(16);
     const passwordHash = await hashPassword(body.password, salt);
-    transact(draft => {
-      requireValue(!draft.merchantAccount, 409, 'ALREADY_REGISTERED', '商家账号已注册，请登录');
-      draft.merchantAccount = { phone, passwordSalt: salt.toString('hex'), passwordHash: passwordHash.toString('hex') };
-    });
-    return startMerchantSession(response, token, 201);
+    const accountId = database.register({ phone, salt: salt.toString('hex'), hash: passwordHash.toString('hex') });
+    requireValue(accountId, 409, 'ALREADY_REGISTERED', '这个手机号已注册，请登录');
+    return startMerchantSession(request, response, accountId, token, 201);
   }
   if (method === 'POST' && pathname === '/api/admin/login') {
     rateLimit(request, 'merchant_login', 10, 60_000);
-    const account = state.merchantAccount;
-    requireValue(account, 409, 'REGISTRATION_REQUIRED', '请先注册商家账号');
     const body = await readJson(request, 2048);
     const phone = normalizedPhone(body.phone);
     requireValue(phone && typeof body.password === 'string' && body.password.length >= 8 && body.password.length <= 256,
       401, 'INVALID_CREDENTIALS', '手机号或密码不正确');
-    requireValue(await passwordMatches(account, body.password) && phone === account.phone &&
-      state.merchantAccount?.passwordHash === account.passwordHash,
+    const account = database.account(phone);
+    // Use the same hashing work for an unknown phone number.
+    const verified = await passwordMatches(account ?? unknownAccount, body.password);
+    requireValue(account && verified && database.password(account.id)?.passwordHash === account.passwordHash,
       401, 'INVALID_CREDENTIALS', '手机号或密码不正确');
-    return startMerchantSession(response, token, 200);
+    return startMerchantSession(request, response, account.id, token, 200);
   }
   if (method === 'POST' && pathname === '/api/admin/logout') {
-    if (token) sessions.delete(token);
-    response.setHeader('Set-Cookie', sessionCookie('', 0));
+    if (token) database.endSession(token);
+    response.setHeader('Set-Cookie', sessionCookie(request, '', 0));
     return writeJson(response, 200, { authenticated: false });
   }
-  requireValue(token, 401, 'AUTH_REQUIRED', '请先登录商家后台');
+  requireValue(session, 401, 'AUTH_REQUIRED', '请先登录商家后台');
+  const { accountId, shopId } = session;
+  const viewStore = () => storeView(database.shop(shopId), true);
   if (method === 'PUT' && pathname === '/api/admin/password') {
     rateLimit(request, 'merchant_password', 5, 60_000);
     const { currentPassword, newPassword } = await readJson(request, 4096);
     requireValue(typeof currentPassword === 'string' && currentPassword.length >= 8 && currentPassword.length <= 256,
       400, 'INVALID_CURRENT_PASSWORD', '当前密码不正确');
     requireValue(validNewPassword(newPassword), 400, 'INVALID_PASSWORD', '新密码须为 8 至 256 个字符');
-    const account = state.merchantAccount;
+    const account = database.password(accountId);
     requireValue(account && await passwordMatches(account, currentPassword),
       400, 'INVALID_CURRENT_PASSWORD', '当前密码不正确');
     requireValue(newPassword !== currentPassword, 400, 'PASSWORD_UNCHANGED', '新密码须与当前密码不同');
 
     const salt = randomBytes(16);
     const hash = await hashPassword(newPassword, salt);
-    transact(draft => {
-      requireValue(getSessionToken(request) === token, 401, 'AUTH_REQUIRED', '请重新登录商家后台');
-      requireValue(draft.merchantAccount?.passwordHash === account.passwordHash,
-        409, 'PASSWORD_CHANGED', '密码已更新，请重新登录');
-      draft.merchantAccount.passwordSalt = salt.toString('hex');
-      draft.merchantAccount.passwordHash = hash.toString('hex');
-    });
-    sessions.clear();
-    response.setHeader('Set-Cookie', sessionCookie('', 0));
-    return writeJson(response, 200, { authenticated: false, registered: true });
+    requireValue(database.session(token), 401, 'AUTH_REQUIRED', '请重新登录商家后台');
+    requireValue(database.changePassword(accountId, account.passwordHash, salt.toString('hex'), hash.toString('hex')),
+      409, 'PASSWORD_CHANGED', '密码已更新，请重新登录');
+    response.setHeader('Set-Cookie', sessionCookie(request, '', 0));
+    return writeJson(response, 200, { authenticated: false });
   }
-  if (method === 'GET' && pathname === '/api/admin/store') return writeJson(response, 200, storeView(true));
-  if (method === 'GET' && pathname === '/api/admin/links') return writeJson(response, 200, shopLinks(request.socket.localPort));
+  if (method === 'GET' && pathname === '/api/admin/store') return writeJson(response, 200, viewStore());
+  if (method === 'GET' && pathname === '/api/admin/links') return writeJson(response, 200, merchantLinks(request, shopId));
   if (method === 'GET' && pathname === '/api/admin/qr') {
     rateLimit(request, 'merchant_qr', 60, 60_000);
-    const landing = validatedWebUrl(url.searchParams.get('url') ?? shopLinks(request.socket.localPort).url);
+    const links = merchantLinks(request, shopId);
+    const landing = validatedWebUrl(url.searchParams.get('url') ?? links.url);
+    requireValue(links.urls.includes(landing.href), 400, 'INVALID_SHOP_LINK', '请选择本店当前的点餐链接');
     const qr = await QRCode.toBuffer(landing.href, { width: 512, margin: 3, errorCorrectionLevel: 'M' });
     return writeResponse(response, 200, 'image/png', qr);
   }
   if (method === 'POST' && pathname === '/api/admin/upload') {
     rateLimit(request, 'merchant_upload', 40, 60_000);
     const body = await readJson(request, 3_350_000);
-    return writeJson(response, 201, { imageUrl: storeUpload(body.dataUrl) });
+    return writeJson(response, 201, { imageUrl: storeUpload(shopId, body.dataUrl) });
   }
   if (method === 'PUT' && pathname === '/api/admin/shop') {
     const body = await readJson(request);
-    transact(draft => Object.assign(draft.shop, {
+    database.changeStore(shopId, [], draft => Object.assign(draft.shop, {
       name: textField(body.name, '店铺名称', 32, true),
       announcement: textField(body.announcement ?? '', '门店公告', 120),
       address: textField(body.address ?? '', '门店地址', 120),
     }));
-    return writeJson(response, 200, storeView(true));
+    return writeJson(response, 200, viewStore());
   }
   if (method === 'GET' && pathname === '/api/admin/orders') {
-    const orders = state.orders.filter(order => order.paymentStatus === 'paid').slice().reverse();
+    const orders = database.list(shopId, 'orders').filter(order => order.paymentStatus === 'paid').reverse();
     return writeJson(response, 200, { orders });
   }
   if (method === 'GET' && pathname === '/api/admin/print-jobs') {
     const orderId = url.searchParams.get('orderId');
-    const jobs = orderId ? state.printJobs.filter(job => job.orderId === orderId) : state.printJobs;
-    return writeJson(response, 200, { jobs: jobs.slice().reverse() });
+    const jobs = database.list(shopId, 'printJobs');
+    return writeJson(response, 200, { jobs: (orderId ? jobs.filter(job => job.orderId === orderId) : jobs).reverse() });
   }
 
   const orderMatch = /^\/api\/admin\/orders\/([a-f0-9-]{36})(\/reprint)?$/.exec(pathname);
   if (orderMatch && method === 'PATCH' && !orderMatch[2]) {
     const body = await readJson(request);
-    const order = transact(draft => {
+    const order = database.changeStore(shopId, ['orders'], draft => {
       const record = orderById(draft, orderMatch[1]);
       const allowedMove = record.paymentStatus === 'paid' && ((body.status === 'ready' && record.status === 'preparing') ||
         (body.status === 'picked' && record.status === 'ready') || (['ready', 'picked'].includes(body.status) && record.status === body.status));
@@ -452,7 +455,7 @@ async function adminRoute(request, response, url) {
     return writeJson(response, 200, { order });
   }
   if (orderMatch && method === 'POST' && orderMatch[2]) {
-    const order = transact(draft => {
+    const order = database.changeStore(shopId, ['orders', 'printJobs'], draft => {
       const record = orderById(draft, orderMatch[1]);
       requireValue(record.paymentStatus === 'paid', 409, 'ORDER_UNPAID', '付款成功后可补打标签');
       addPrintJob(draft, record, 'reprint');
@@ -465,7 +468,7 @@ async function adminRoute(request, response, url) {
   if (menuMatch) {
     const [, collection, id] = menuMatch;
     if (method === 'DELETE' && id) {
-      transact(draft => {
+      database.changeStore(shopId, ['categories', 'items'], draft => {
         const index = draft[collection].findIndex(record => record.id === id);
         requireValue(index >= 0, 404, 'MENU_RECORD_NOT_FOUND', '找不到这条菜单记录');
         if (collection === 'categories') {
@@ -473,11 +476,11 @@ async function adminRoute(request, response, url) {
         }
         draft[collection].splice(index, 1);
       });
-      return writeJson(response, 200, storeView(true));
+      return writeJson(response, 200, viewStore());
     }
     if ((method === 'POST' && !id) || (method === 'PUT' && id)) {
       const body = await readJson(request);
-      transact(draft => {
+      database.changeStore(shopId, ['categories', 'items'], draft => {
         const records = draft[collection];
         const index = id ? records.findIndex(record => record.id === id) : -1;
         if (id) requireValue(index >= 0, 404, 'MENU_RECORD_NOT_FOUND', '找不到这条菜单记录');
@@ -491,7 +494,7 @@ async function adminRoute(request, response, url) {
         if (id) records[index] = record;
         else records.push(record);
       });
-      return writeJson(response, method === 'POST' ? 201 : 200, storeView(true));
+      return writeJson(response, method === 'POST' ? 201 : 200, viewStore());
     }
   }
   throw new RequestError(404, 'NOT_FOUND', '未找到此接口');
@@ -504,26 +507,41 @@ async function apiRoute(request, response, url) {
     requireValue(request.headers['sec-fetch-site'] !== 'cross-site', 403, 'CROSS_SITE_REQUEST', '请在本网页内操作');
   }
   if (pathname.startsWith('/api/admin/')) return adminRoute(request, response, url);
+  if (method === 'GET' && pathname === '/api/demo/qr') {
+    requireValue(isLocalRequest(request), 404, 'NOT_FOUND', '该页面不存在');
+    const links = accessLinks(request.socket.localPort, merchantEntryPath);
+    const localOnly = new URL(links.url).hostname === 'localhost';
+    const status = links.publicStatus || (demoStarting ? 'starting' : localOnly ? 'local' : 'lan');
+    const target = ['local', 'starting'].includes(status) ? null : links.url;
+    if (target && demoCode?.url !== target) {
+      demoCode = { url: target, image: await QRCode.toDataURL(target, { width: 512, margin: 4 }) };
+    }
+    return writeJson(response, 200, { status, url: target, image: target ? demoCode.image : null });
+  }
+  const storeId = url.searchParams.get('store');
   if (method === 'GET' && pathname === '/api/store') {
-    requireValue(resolveStoreEntry(url, state.shop), 404, 'STORE_NOT_FOUND', '未找到此门店，请重新扫描店铺二维码');
-    return writeJson(response, 200, storeView());
+    return writeJson(response, 200, storeView(storeId === null ? null : requireShop(storeId)));
   }
   if (method === 'GET' && pathname === '/api/queue') {
-    requireValue(resolveStoreEntry(url, state.shop), 404, 'STORE_NOT_FOUND', '未找到此门店，请重新扫描店铺二维码');
-    return writeJson(response, 200, { waitingCount: waitingCount() });
+    return writeJson(response, 200, { waitingCount: database.waitingCount(requireShop(storeId).id) });
   }
   if (method === 'GET' && pathname === '/api/health') return writeJson(response, 200, { ok: true, paymentMode: paymentAdapter.mode, printMode: printAdapter.mode });
   if (method === 'POST' && pathname === '/api/orders') {
     rateLimit(request, 'order_create', 50, 60_000);
+    const shop = requireShop(storeId);
     const body = await readJson(request);
-    return writeJson(response, 201, { order: createOrder(body) });
+    return writeJson(response, 201, { order: createOrder(shop.id, body) });
   }
   const orderMatch = /^\/api\/orders\/([a-f0-9-]{36})(\/pay)?$/.exec(pathname);
-  if (orderMatch && method === 'GET' && !orderMatch[2]) return writeJson(response, 200, { order: orderById(state, orderMatch[1]) });
+  if (orderMatch && method === 'GET' && !orderMatch[2]) {
+    const order = database.order(requireShop(storeId).id, orderMatch[1]);
+    requireValue(order, 404, 'ORDER_NOT_FOUND', '未找到该订单');
+    return writeJson(response, 200, { order });
+  }
   if (orderMatch && method === 'POST' && orderMatch[2]) {
     rateLimit(request, 'order_payment', 80, 60_000);
     await readJson(request, 2048);
-    return writeJson(response, 200, { order: simulatePayment(orderMatch[1]) });
+    return writeJson(response, 200, { order: simulatePayment(requireShop(storeId).id, orderMatch[1]) });
   }
   throw new RequestError(404, 'NOT_FOUND', '未找到此接口');
 }
@@ -533,28 +551,45 @@ function serveFile(request, response, url) {
   let path;
   try { path = decodeURIComponent(url.pathname); }
   catch { throw new RequestError(400, 'INVALID_PATH', '链接有误'); }
-  if (path === '/') path = '/index.html';
+  if (path === '/' || path === '/order' || path === '/order/' || path === '/index.html') {
+    if (!url.searchParams.has('store')) {
+      response.writeHead(302, { Location: merchantEntryPath, 'Cache-Control': 'no-store' });
+      response.end();
+      return;
+    }
+    path = '/index.html';
+  }
   if (path === '/merchant' || path === '/merchant/') path = '/merchant.html';
-  if (path === '/order' || path === '/order/') path = '/index.html';
-  const upload = path.startsWith('/uploads/');
-  const directory = upload ? uploadDir : publicDir;
-  const relativePath = upload ? path.slice('/uploads/'.length) : path.slice(1);
+  if (path === '/demo' || path === '/demo/') path = '/demo.html';
+  if (path === '/demo.html') requireValue(isLocalRequest(request), 404, 'NOT_FOUND', '该页面不存在');
+  if (path.startsWith('/uploads/')) {
+    const filename = uploadName.exec(path)?.[1];
+    const uploaded = filename && database.upload(filename);
+    requireValue(uploaded, 404, 'NOT_FOUND', '该图片不存在');
+    response.writeHead(200, {
+      'Content-Type': uploaded.mime, 'Content-Length': uploaded.image.length,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+    response.end(request.method === 'HEAD' ? undefined : uploaded.image);
+    return;
+  }
+  const relativePath = path.slice(1);
   requireValue(!relativePath.includes('\\') && !relativePath.includes('\0') && !relativePath.split('/').some(part => part.startsWith('.')),
     404, 'NOT_FOUND', '该页面不存在');
-  const file = resolve(directory, relativePath);
+  const file = resolve(publicDir, relativePath);
   const extension = extname(file).toLowerCase();
   const contentType = fileTypes.get(extension);
-  const detail = file.startsWith(`${directory}${sep}`) && contentType ? statSync(file, { throwIfNoEntry: false }) : undefined;
+  const detail = file.startsWith(`${publicDir}${sep}`) && contentType ? statSync(file, { throwIfNoEntry: false }) : undefined;
   requireValue(detail?.isFile(), 404, 'NOT_FOUND', '该页面不存在');
   response.writeHead(200, {
     'Content-Type': contentType, 'Content-Length': detail.size,
-    'Cache-Control': extension === '.html' ? 'no-cache' : (upload ? 'public, max-age=31536000, immutable' : 'no-cache'),
+    'Cache-Control': 'no-cache',
   });
   if (request.method === 'HEAD') response.end();
   else createReadStream(file).on('error', () => response.destroy()).pipe(response);
 }
 
-const server = createServer(async (request, response) => {
+export const server = createServer(async (request, response) => {
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('X-Frame-Options', 'DENY');
@@ -573,21 +608,17 @@ const server = createServer(async (request, response) => {
 
 setInterval(() => {
   const now = Date.now();
-  for (const [token, expiry] of sessions) if (expiry <= now) sessions.delete(token);
+  database.expireSessions();
   for (const [key, window] of requestWindows) if (window.expiresAt <= now) requestWindows.delete(key);
 }, 60_000).unref();
 
-server.listen(port, bindHost, () => {
-  const actualPort = server.address().port;
-  console.log(`本机点餐地址  http://localhost:${actualPort}`);
-  console.log(`本机商家后台  http://localhost:${actualPort}/merchant`);
-  for (const url of shopLinks(actualPort).urls) console.log(`扫码点餐地址  ${url}`);
-  console.log(state.merchantAccount ? '商家后台已开通，请使用手机号登录' : '首次使用请在本机注册商家账号');
-  if (process.platform === 'win32' && process.env.ORDER_DEMO_OPEN_BROWSER === '1') {
-    const browser = spawn('cmd.exe', ['/d', '/s', '/c', `start "" "http://127.0.0.1:${actualPort}/"`], {
-      windowsVerbatimArguments: true, windowsHide: true, stdio: 'ignore',
-    });
-    browser.on('error', () => console.log('请在浏览器中打开本机点餐地址'));
-    browser.unref();
-  }
+export const serverReady = new Promise((resolve, reject) => {
+  server.once('error', reject);
+  server.listen(port, bindHost, () => {
+    server.removeListener('error', reject);
+    const actualPort = server.address().port;
+    console.log(`本机商家入口  http://localhost:${actualPort}${merchantEntryPath}`);
+    console.log(`本机商家后台  http://localhost:${actualPort}/merchant`);
+    resolve(actualPort);
+  });
 });

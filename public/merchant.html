@@ -23,36 +23,45 @@
       <button class="theme-toggle" type="button" aria-label="夜间模式" aria-pressed="false" title="切换到夜间模式">
         <span class="theme-sky" aria-hidden="true"><span class="theme-clouds"></span><span class="theme-stars"></span><span class="theme-orb"></span></span>
       </button>
-      <a class="button button-ghost" href="/">顾客点餐页</a>
+      <a class="button button-link" id="customer-link" hidden>本店点餐页</a>
       <button class="button button-link" type="button" id="logout-button" hidden>退出登录</button>
     </div>
   </header>
 
   <main id="loading" class="initial-status" role="status">正在连接工作台…</main>
 
-  <main class="login-layout" id="login-view" hidden>
+  <main class="login-layout" id="login-view" data-auth-mode="login" hidden>
     <section class="login-card">
-      <p class="eyebrow">商家入口</p>
-      <h1 id="login-title">商家工作台</h1>
-      <p class="muted" id="login-description">维护门店菜单、查看订单并生成点餐二维码。</p>
-      <form id="login-form" aria-labelledby="login-title" hidden>
-        <label class="field"><span>手机号</span><input id="merchant-phone" name="phone" type="tel" autocomplete="username" pattern="(?:\+86)?1[3-9][0-9]{9}" maxlength="14" required placeholder="请输入手机号" title="请输入 11 位中国大陆手机号，可带 +86 前缀"></label>
-        <label class="field"><span>密码</span><input id="merchant-password" name="password" type="password" autocomplete="current-password" maxlength="256" required placeholder="请输入密码"></label>
-        <button class="button button-primary button-full" type="submit" id="login-submit">登录</button>
-      </form>
-      <p class="field-help login-notice" id="login-notice" role="status" hidden></p>
-      <p class="form-error" id="login-error" role="alert" hidden></p>
-      <button class="button button-outline login-retry" type="button" id="login-retry" hidden>重新连接</button>
+      <div class="login-content">
+        <div class="auth-options" id="auth-options" role="group" aria-label="商家账号操作" hidden>
+          <button class="button" type="button" data-mode="login" aria-controls="login-form" aria-pressed="false">登录</button>
+          <button class="button" type="button" data-mode="register" aria-controls="login-form" aria-pressed="false">注册</button>
+        </div>
+        <div class="login-heading">
+          <h1 id="login-title" aria-live="polite">商家工作台</h1>
+          <p class="muted" id="login-description">管理门店、菜单与订单。</p>
+        </div>
+        <form id="login-form" aria-labelledby="login-title" hidden>
+          <label class="field"><span>手机号</span><input id="merchant-phone" name="phone" type="tel" autocomplete="username" pattern="(?:\+86)?1[3-9][0-9]{9}" maxlength="14" required placeholder="请输入手机号" title="请输入 11 位中国大陆手机号，可带 +86 前缀"></label>
+          <label class="field"><span>密码</span><input id="merchant-password" name="password" type="password" autocomplete="current-password" maxlength="256" required placeholder="请输入密码"></label>
+          <button class="button button-primary button-full" type="submit" id="login-submit">登录</button>
+        </form>
+        <p class="form-error" id="login-error" role="alert" hidden></p>
+        <button class="button button-secondary login-retry" type="button" id="login-retry" hidden>重新连接</button>
+      </div>
     </section>
-    <div class="login-panel">
-      <span class="panel-emblem" aria-hidden="true">餐</span>
-      <div><p class="login-panel-label">窗口自取</p><p class="login-panel-title">门店点餐管理</p><p>录入菜品后，将点餐码放在取餐窗口。</p></div>
-    </div>
+    <aside class="login-panel" id="auth-panel" aria-labelledby="auth-panel-title">
+      <div class="login-panel-content">
+        <h2 id="auth-panel-title">第一次使用？</h2>
+        <p id="auth-panel-description">开通门店、录入菜单，生成专属点餐码。</p>
+        <button class="button auth-switch" type="button" id="auth-switch" data-mode="register" aria-controls="login-form" hidden>去注册</button>
+      </div>
+    </aside>
   </main>
 
   <main class="dashboard" id="dashboard" hidden>
     <aside class="sidebar">
-      <div class="shop-identity"><img class="shop-symbol" src="/assets/shop-window.jpg" width="43" height="43" alt=""><div><strong id="sidebar-shop">窗口小食</strong><span>窗口门店</span></div></div>
+      <div class="shop-identity"><img class="shop-symbol" src="/assets/shop-window.jpg" width="43" height="43" alt=""><div><strong id="sidebar-shop">我的门店</strong><span>窗口门店</span></div></div>
       <nav class="workspace-nav" aria-label="商家功能">
         <button type="button" data-tab="menu" class="active" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8m-8 4h8m-8 3h4"/></svg>菜单管理</button>
         <button type="button" data-tab="orders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6m-6 4h6"/></svg>取餐订单</button>
@@ -66,7 +75,7 @@
         <div class="page-heading"><h1 id="menu-title">菜单管理</h1><button type="button" class="button button-primary" data-action="add-item"><span aria-hidden="true">+</span> 新增餐品</button></div>
         <div class="metrics" id="menu-metrics"></div>
         <section class="surface category-panel" aria-labelledby="categories-title">
-          <div class="section-heading"><h2 id="categories-title">餐品分类</h2><button type="button" class="button button-outline button-small" data-action="add-category">新增分类</button></div>
+          <div class="section-heading"><h2 id="categories-title">餐品分类</h2><button type="button" class="button button-secondary button-small" data-action="add-category">新增分类</button></div>
           <div id="category-list"></div>
         </section>
         <section class="surface items-panel" aria-labelledby="items-title">
@@ -76,7 +85,7 @@
       </section>
 
       <section data-panel="orders" id="orders-panel" aria-labelledby="orders-title" hidden>
-        <div class="page-heading"><div><h1 id="orders-title">取餐订单</h1><p class="muted">查看已付款订单，按取餐号备餐与交付。</p></div><button type="button" class="button button-outline" data-action="refresh-orders">刷新订单</button></div>
+        <div class="page-heading"><div><h1 id="orders-title">取餐订单</h1><p class="muted">查看已付款订单，按取餐号备餐与交付。</p></div><button type="button" class="button button-secondary" data-action="refresh-orders">刷新订单</button></div>
         <div class="surface orders-panel"><div id="order-filters" class="filter-tabs" aria-label="筛选订单"></div><div id="order-list" aria-live="polite"></div></div>
       </section>
 
@@ -92,7 +101,7 @@
       </section>
 
       <section data-panel="qr" id="qr-panel" aria-labelledby="qr-title" hidden>
-        <div class="page-heading"><div><h1 id="qr-title">点餐二维码</h1><p class="muted">把二维码放在门店窗口，顾客扫码即可进入菜单。</p></div></div>
+        <div class="page-heading"><div><h1 id="qr-title">点餐二维码</h1><p class="muted">顾客扫描屏幕上的二维码即可打开点餐页。</p></div></div>
         <div id="qr-content" class="surface qr-layout" aria-live="polite"></div>
       </section>
     </div>
